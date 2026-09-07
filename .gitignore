@@ -1,0 +1,25 @@
+# .gitignore
+# Ignore files that may contain API keys or other secrets
+# Add the exact file name/path that holds your bgroq API key if it's different from the examples below.
+
+# Environment files
+.env
+.env.local
+.env.*
+
+# groq-specific files (examples — add the actual file name you use)
+groq.key
+groq_api_key
+groq_api_key.txt
+.groq
+
+# Common credential files
+credentials.json
+secrets.json
+*.pem
+*.key
+
+# If you already committed the API key file, remove it from the index and rotate the key:
+#   git rm --cached path/to/file
+#   git commit -m "Remove API key from repo"
+# Then rotate/regenerate the API key in the service (bgroq) because it may have been exposed.
