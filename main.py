@@ -1,12 +1,25 @@
-from dotenv import load_dotenv
-load_dotenv()
 import os
-from fastapi import FastAPI
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # Render injects env vars directly, no .env file needed
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from groq import Groq
 from chroma_setup import add_fact, query_facts
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # tighten to your real Vercel domain before real launch
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 BACKEND = os.environ.get("INFERENCE_BACKEND", "groq")
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 
@@ -41,8 +54,6 @@ async def call_model(prompt: str) -> str:
     )
     return r.choices[0].message.content
 
-
-from fastapi import HTTPException
 
 @app.get("/generate")
 async def generate(prompt: str = ""):
