@@ -1,9 +1,9 @@
 import numpy as np
 import pickle
 import os
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
-model = SentenceTransformer('all-MiniLM-L6-v2')
+model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 store = []
 
 STORE_FILE = "store.pkl"
@@ -20,12 +20,15 @@ def load_store():
 
 load_store()  # runs on import — loads saved facts if store.pkl exists
 
+def embed(text: str):
+    return list(model.embed([text]))[0]
+
 def add_fact(id: str, text: str, source: str = "", country: str = "Nigeria"):
-    embedding = model.encode(text)
+    embedding = embed(text)
     store.append({"id": id, "text": text, "source": source, "country": country, "embedding": embedding})
 
 def query_facts(question: str, n: int = 3):
-    q_embedding = model.encode(question)
+    q_embedding = embed(question)
     scored = []
     for item in store:
         sim = np.dot(q_embedding, item["embedding"]) / (
