@@ -25,12 +25,13 @@ def rebuild_from_corpus():
     store = []
     with open("corpus.csv", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        for row in reader:
+        for idx, row in enumerate(reader):
+            combined_text = f"Q: {row['question_or_title']}\nA: {row['answer_or_content']}"
             add_fact(
-                id=row["id"],
-                text=row["text"],
-                source=row.get("source", ""),
-                country=row.get("country", "Nigeria")
+                id=str(idx),
+                text=combined_text,
+                source=row.get("source_url", ""),
+                country="Nigeria"
             )
     save_store()
 
