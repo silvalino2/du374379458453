@@ -1,139 +1,59 @@
+import numpy as np
+import pickle
 import os
-import logging
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass  # Render injects env vars directly, no .env file needed
+import csv
+from fastembed import TextEmbedding
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("baobab")
+model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+store = []
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-import httpx
-from groq import Groq
-from chroma_setup import add_fact, query_facts
+STORE_FILE = "store.pkl"
 
-app = FastAPI()
+def save_store():
+    with open(STORE_FILE, "wb") as f:
+        pickle.dump(store, f)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def embed(text: str):
+    return list(model.embed([text]))[0]
 
-BACKEND = os.environ.get("INFERENCE_BACKEND", "groq")
-groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+def add_fact(id: str, text: str, source: str = "", country: str = "Nigeria"):
+    embedding = embed(text)
+    store.append({"id": id, "text": text, "source": source, "country": country, "embedding": embedding})
 
-SIMILARITY_THRESHOLD = 0.4
-
-
-def build_rag_prompt(user_query: str, context_chunks: list[str]) -> str:
-    context_block = "\n\n".join(context_chunks)
-    return f"""Use the following context to answer the question. If the context doesn't contain the answer, say you don't know — do not make up information.
-
-Context:
-{context_block}
-
-Question: {user_query}
-
-Answer:"""
-
-
-async def call_model(prompt: str) -> str:
-    if BACKEND == "ollama":
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                "http://localhost:11434/api/generate",
-                json={"model": "llama3.1:8b", "prompt": prompt, "stream": False},
-                timeout=60.0
+def rebuild_from_corpus():
+    global store
+    store = []
+    with open("corpus.csv", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for idx, row in enumerate(reader):
+            combined_text = f"Q: {row['question_or_title']}\nA: {row['answer_or_content']}"
+            add_fact(
+                id=str(idx),
+                text=combined_text,
+                source=row.get("source_url", ""),
+                country="Nigeria"
             )
-            return r.json()["response"]
+    save_store()
 
-    r = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[{"role": "user", "content": prompt}],
-        tools=[{"type": "code_interpreter"}],
-        reasoning_effort="medium",
-        timeout=15.0
-    )
-    return r.choices[0].message.content
+def load_store():
+    global store
+    if os.path.exists(STORE_FILE):
+        with open(STORE_FILE, "rb") as f:
+            store = pickle.load(f)
+        if store and len(store[0]["embedding"]) != len(embed("test")):
+            rebuild_from_corpus()
+    else:
+        rebuild_from_corpus()
 
+load_store()
 
-async def call_model_with_web_fallback(user_query: str) -> str:
-    prompt = f"""Answer this question about Nigerian civic/government processes as accurately as possible. If you use web search, prioritize official Nigerian government sources (.gov.ng domains) where possible.
-
-Question: {user_query}
-
-Answer:"""
-
-    r = groq_client.chat.completions.create(
-        model="groq/compound",
-        messages=[{"role": "user", "content": prompt}],
-        timeout=30.0
-    )
-    return r.choices[0].message.content
-
-
-@app.get("/generate")
-async def generate(prompt: str = ""):
-    prompt = prompt.strip()
-
-    if not prompt:
-        raise HTTPException(status_code=400, detail="prompt cannot be empty")
-
-    if len(prompt) > 500:
-        raise HTTPException(status_code=400, detail="prompt too long — keep under 500 characters")
-
-    try:
-        results = query_facts(prompt, n=3)
-    except Exception as e:
-        logger.exception("retrieval failed")
-        raise HTTPException(status_code=500, detail=f"retrieval failed: {str(e)}")
-
-    good_matches = [(text, source) for score, text, source in results if score >= SIMILARITY_THRESHOLD]
-
-    if not good_matches:
-        try:
-            response = await call_model_with_web_fallback(prompt)
-        except Exception as e:
-            logger.exception("web fallback call failed")
-            raise HTTPException(status_code=503, detail=f"model backend unavailable: {str(e)}")
-
-        return {
-            "response": response,
-            "sources": [],
-            "source_type": "web",
-            "note": "No verified entry in our Nigerian civic database yet — this answer came from a live web search. Double-check before relying on it."
-        }
-
-    context_texts = [text for text, source in good_matches]
-    full_prompt = build_rag_prompt(prompt, context_texts)
-
-    try:
-        response = await call_model(full_prompt)
-    except Exception as e:
-        logger.exception("primary model call failed")
-        raise HTTPException(status_code=503, detail=f"model backend unavailable: {str(e)}")
-
-    return {
-        "response": response,
-        "sources": [{"text": t, "source": s} for t, s in good_matches],
-        "source_type": "corpus"
-    }
-
-
-@app.get("/search")
-def search(q: str):
-    return {"matches": query_facts(q)}
-
-
-@app.get("/tokentest")
-def tokentest(text: str):
-    r = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[{"role": "user", "content": text}]
-    )
-    return {"text": text, "prompt_tokens": r.usage.prompt_tokens}
+def query_facts(question: str, n: int = 3):
+    q_embedding = embed(question)
+    scored = []
+    for item in store:
+        sim = np.dot(q_embedding, item["embedding"]) / (
+            np.linalg.norm(q_embedding) * np.linalg.norm(item["embedding"])
+        )
+        scored.append((sim, item["text"], item["source"]))
+    scored.sort(reverse=True, key=lambda x: x[0])
+    return scored[:n]
