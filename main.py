@@ -39,6 +39,7 @@ Answer:"""
 
 
 async def call_model(prompt: str) -> str:
+    """Grounded answer path — used when RAG finds a good match."""
     if BACKEND == "ollama":
         async with httpx.AsyncClient() as client:
             r = await client.post(
@@ -47,10 +48,30 @@ async def call_model(prompt: str) -> str:
                 timeout=60.0
             )
             return r.json()["response"]
+
     r = groq_client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": prompt}],
+        tools=[{"type": "code_interpreter"}],
+        reasoning_effort="medium",
         timeout=15.0
+    )
+    return r.choices[0].message.content
+
+
+async def call_model_with_web_fallback(user_query: str) -> str:
+    """Fallback path — used when the corpus has no confident match.
+    Switches to groq/compound, which decides on its own when to search the web."""
+    prompt = f"""Answer this question about Nigerian civic/government processes as accurately as possible. If you use web search, prioritize official Nigerian government sources (.gov.ng domains) where possible.
+
+Question: {user_query}
+
+Answer:"""
+
+    r = groq_client.chat.completions.create(
+        model="groq/compound",
+        messages=[{"role": "user", "content": prompt}],
+        timeout=20.0
     )
     return r.choices[0].message.content
 
@@ -73,17 +94,33 @@ async def generate(prompt: str = ""):
     good_matches = [(text, source) for score, text, source in results if score >= SIMILARITY_THRESHOLD]
 
     if not good_matches:
-        return {"response": "I don't have information on that yet.", "sources": []}
+        # Self-correction: don't hallucinate — reach for the web instead of guessing
+        try:
+            response = await call_model_with_web_fallback(prompt)
+        except Exception:
+            raise HTTPException(status_code=503, detail="model backend unavailable — try again shortly")
+
+        return {
+            "response": response,
+            "sources": [],
+            "source_type": "web",
+            "note": "No verified entry in our Nigerian civic database yet — this answer came from a live web search. Double-check before relying on it."
+        }
 
     context_texts = [text for text, source in good_matches]
     full_prompt = build_rag_prompt(prompt, context_texts)
 
     try:
         response = await call_model(full_prompt)
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=503, detail="model backend unavailable — try again shortly")
 
-    return {"response": response, "sources": [{"text": t, "source": s} for t, s in good_matches]}
+    return {
+        "response": response,
+        "sources": [{"text": t, "source": s} for t, s in good_matches],
+        "source_type": "corpus"
+    }
+
 
 @app.get("/search")
 def search(q: str):
@@ -93,7 +130,7 @@ def search(q: str):
 @app.get("/tokentest")
 def tokentest(text: str):
     r = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="openai/gpt-oss-20b",
         messages=[{"role": "user", "content": text}]
     )
     return {"text": text, "prompt_tokens": r.usage.prompt_tokens}
