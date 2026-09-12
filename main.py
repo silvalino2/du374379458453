@@ -1,9 +1,13 @@
 import os
+import logging
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass  # Render injects env vars directly, no .env file needed
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("baobab")
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +19,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten to your real Vercel domain before real launch
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -23,7 +27,7 @@ app.add_middleware(
 BACKEND = os.environ.get("INFERENCE_BACKEND", "groq")
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 
-SIMILARITY_THRESHOLD = 0.4  # placeholder — tune once real data + real queries exist
+SIMILARITY_THRESHOLD = 0.4
 
 
 def build_rag_prompt(user_query: str, context_chunks: list[str]) -> str:
@@ -39,7 +43,6 @@ Answer:"""
 
 
 async def call_model(prompt: str) -> str:
-    """Grounded answer path — used when RAG finds a good match."""
     if BACKEND == "ollama":
         async with httpx.AsyncClient() as client:
             r = await client.post(
@@ -60,8 +63,6 @@ async def call_model(prompt: str) -> str:
 
 
 async def call_model_with_web_fallback(user_query: str) -> str:
-    """Fallback path — used when the corpus has no confident match.
-    Switches to groq/compound, which decides on its own when to search the web."""
     prompt = f"""Answer this question about Nigerian civic/government processes as accurately as possible. If you use web search, prioritize official Nigerian government sources (.gov.ng domains) where possible.
 
 Question: {user_query}
@@ -71,7 +72,7 @@ Answer:"""
     r = groq_client.chat.completions.create(
         model="groq/compound",
         messages=[{"role": "user", "content": prompt}],
-        timeout=20.0
+        timeout=30.0
     )
     return r.choices[0].message.content
 
@@ -89,16 +90,17 @@ async def generate(prompt: str = ""):
     try:
         results = query_facts(prompt, n=3)
     except Exception as e:
+        logger.exception("retrieval failed")
         raise HTTPException(status_code=500, detail=f"retrieval failed: {str(e)}")
 
     good_matches = [(text, source) for score, text, source in results if score >= SIMILARITY_THRESHOLD]
 
     if not good_matches:
-        # Self-correction: don't hallucinate — reach for the web instead of guessing
         try:
             response = await call_model_with_web_fallback(prompt)
-        except Exception:
-            raise HTTPException(status_code=503, detail="model backend unavailable — try again shortly")
+        except Exception as e:
+            logger.exception("web fallback call failed")
+            raise HTTPException(status_code=503, detail=f"model backend unavailable: {str(e)}")
 
         return {
             "response": response,
@@ -112,8 +114,9 @@ async def generate(prompt: str = ""):
 
     try:
         response = await call_model(full_prompt)
-    except Exception:
-        raise HTTPException(status_code=503, detail="model backend unavailable — try again shortly")
+    except Exception as e:
+        logger.exception("primary model call failed")
+        raise HTTPException(status_code=503, detail=f"model backend unavailable: {str(e)}")
 
     return {
         "response": response,
